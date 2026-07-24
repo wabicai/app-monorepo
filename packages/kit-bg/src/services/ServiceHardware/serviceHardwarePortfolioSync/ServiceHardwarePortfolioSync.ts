@@ -38,6 +38,7 @@ export type IPortfolioSyncStatus =
   | 'cooldown'
   | 'disabled'
   | 'duplicate'
+  | 'empty'
   | 'error'
   | 'device-disconnected'
   | 'hardware-busy'
@@ -353,6 +354,27 @@ class ServiceHardwarePortfolioSync extends ServiceBase {
       if (!(await this.shouldRunDevFlow())) {
         debugPortfolioSyncLog('skip-disabled');
         this.setLastResult({ status: 'disabled', updatedAt });
+        return;
+      }
+
+      // An empty portfolio (no positive-balance tokens) carries nothing to
+      // display on the hardware device. Skip the build -> server pack ->
+      // upload pipeline entirely: otherwise we waste a network round-trip, a
+      // signed-package download, and a device write, and a transient empty
+      // settle (e.g. balances not yet loaded during a refresh) would overwrite
+      // a previously-synced non-empty portfolio because its contentHash
+      // differs from the last non-empty hash.
+      if (eventPayload.tokens.length === 0) {
+        debugPortfolioSyncLog('skip-empty', {
+          totalTokenCount: eventPayload.tokens.length,
+        });
+        this.setLastResult({
+          deviceConnectId: eventPayload.deviceConnectId,
+          status: 'empty',
+          totalTokenCount: eventPayload.tokens.length,
+          updatedAt,
+          walletId: eventPayload.walletId,
+        });
         return;
       }
 

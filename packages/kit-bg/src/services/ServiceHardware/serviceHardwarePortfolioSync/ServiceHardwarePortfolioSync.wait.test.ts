@@ -1,5 +1,10 @@
+import accountUtils from '@onekeyhq/shared/src/utils/accountUtils';
+
+import { currencyPersistAtom } from '../../../states/jotai/atoms';
+
 import ServiceHardwarePortfolioSync from './ServiceHardwarePortfolioSync';
 
+import type { IPortfolioSyncSettledPayload } from './serviceHardwarePortfolioSyncUtils';
 import type { IBackgroundApi } from '../../../apis/IBackgroundApi';
 
 jest.mock('@onekeyhq/shared/src/background/backgroundDecorators', () => ({
@@ -26,16 +31,25 @@ jest.mock('@onekeyhq/shared/src/platformEnv', () => ({
 
 jest.mock('@onekeyhq/shared/src/utils/accountUtils', () => ({
   __esModule: true,
-  default: {},
+  default: { isHwWallet: jest.fn() },
 }));
 
 jest.mock('../../../states/jotai/atoms', () => ({
-  currencyPersistAtom: {},
-  settingsPersistAtom: {},
+  currencyPersistAtom: { get: jest.fn() },
+  settingsPersistAtom: { get: jest.fn() },
 }));
 
 jest.mock('../../../states/jotai/atoms/devSettings', () => ({
-  devSettingsPersistAtom: {},
+  devSettingsPersistAtom: {
+    get: jest.fn().mockResolvedValue({
+      enabled: true,
+      settings: {
+        enablePortfolioSyncDev: true,
+        enablePro2TestMode: true,
+      },
+    }),
+  },
+  isPro2DebugModuleEnabled: jest.fn().mockReturnValue(true),
 }));
 
 describe('ServiceHardwarePortfolioSync.waitForActivePortfolioSync', () => {
@@ -84,5 +98,44 @@ describe('ServiceHardwarePortfolioSync.waitForActivePortfolioSync', () => {
     await expect(
       service.waitForActivePortfolioSync({ connectId: 'PRO2_CONNECT_ID' }),
     ).resolves.toBe(false);
+  });
+});
+
+describe('ServiceHardwarePortfolioSync.syncSettledPortfolio', () => {
+  test('short-circuits an empty portfolio before build or upload', async () => {
+    const service = new ServiceHardwarePortfolioSync({
+      backgroundApi: {} as IBackgroundApi,
+    });
+    const payload: IPortfolioSyncSettledPayload = {
+      accountAddress: '0x1234567890abcdef',
+      accountId: 'evm--1',
+      aggregateTokenMap: {},
+      deviceConnectId: 'PRO2_CONNECT_ID',
+      totalFiat: '0',
+      totalTokenCount: 0,
+      tokenMap: {},
+      tokens: [],
+      walletId: 'hw-1',
+      walletType: 'hw',
+    };
+
+    await (
+      service as unknown as {
+        syncSettledPortfolio: (
+          eventPayload: IPortfolioSyncSettledPayload,
+        ) => Promise<void>;
+      }
+    ).syncSettledPortfolio(payload);
+
+    expect(currencyPersistAtom.get).not.toHaveBeenCalled();
+    expect(accountUtils.isHwWallet).not.toHaveBeenCalled();
+    await expect(service.getLastPortfolioSyncResultForDev()).resolves.toEqual(
+      expect.objectContaining({
+        deviceConnectId: 'PRO2_CONNECT_ID',
+        status: 'empty',
+        totalTokenCount: 0,
+        walletId: 'hw-1',
+      }),
+    );
   });
 });
