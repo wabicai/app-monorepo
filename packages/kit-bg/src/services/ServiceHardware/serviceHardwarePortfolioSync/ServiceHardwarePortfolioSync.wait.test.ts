@@ -52,10 +52,13 @@ jest.mock('../../../states/jotai/atoms/devSettings', () => ({
   isPro2DebugModuleEnabled: jest.fn().mockReturnValue(true),
 }));
 
-describe('ServiceHardwarePortfolioSync.waitForActivePortfolioSync', () => {
-  test('waits for the active upload instead of cancelling it', async () => {
+describe('ServiceHardwarePortfolioSync.cancelActivePortfolioSync', () => {
+  test('cancels the active operation and waits for upload cleanup', async () => {
+    const cancelHardwareOperation = jest.fn().mockResolvedValue(undefined);
     const service = new ServiceHardwarePortfolioSync({
-      backgroundApi: {} as IBackgroundApi,
+      backgroundApi: {
+        serviceHardware: { cancelHardwareOperation },
+      } as unknown as IBackgroundApi,
     });
     let resolveUpload:
       | ((value: { portfolioUpdated: boolean }) => void)
@@ -65,25 +68,39 @@ describe('ServiceHardwarePortfolioSync.waitForActivePortfolioSync', () => {
         resolveUpload = resolve;
       },
     );
-    const activeUploads = new Map([['PRO2_CONNECT_ID', uploadPromise]]);
+    const activeUpload = {
+      cancelledByUser: false,
+      operationId: 'portfolio:PRO2_CONNECT_ID:1:1',
+      promise: uploadPromise,
+    };
+    const activeUploads = new Map([['PRO2_CONNECT_ID', activeUpload]]);
     (
       service as unknown as {
         activeUploadByConnectId: Map<
           string,
-          Promise<{ portfolioUpdated: boolean }>
+          {
+            cancelledByUser: boolean;
+            operationId: string;
+            promise: Promise<{ portfolioUpdated: boolean }>;
+          }
         >;
       }
     ).activeUploadByConnectId = activeUploads;
 
     let completed = false;
     const waiting = service
-      .waitForActivePortfolioSync({ connectId: 'PRO2_CONNECT_ID' })
+      .cancelActivePortfolioSync({ connectId: 'PRO2_CONNECT_ID' })
       .then((result) => {
         completed = true;
         return result;
       });
 
     await Promise.resolve();
+    expect(activeUpload.cancelledByUser).toBe(true);
+    expect(cancelHardwareOperation).toHaveBeenCalledWith({
+      connectId: 'PRO2_CONNECT_ID',
+      operationId: 'portfolio:PRO2_CONNECT_ID:1:1',
+    });
     expect(completed).toBe(false);
 
     resolveUpload?.({ portfolioUpdated: true });
@@ -96,7 +113,7 @@ describe('ServiceHardwarePortfolioSync.waitForActivePortfolioSync', () => {
     });
 
     await expect(
-      service.waitForActivePortfolioSync({ connectId: 'PRO2_CONNECT_ID' }),
+      service.cancelActivePortfolioSync({ connectId: 'PRO2_CONNECT_ID' }),
     ).resolves.toBe(false);
   });
 });

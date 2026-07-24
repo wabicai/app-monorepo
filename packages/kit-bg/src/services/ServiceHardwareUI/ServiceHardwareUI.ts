@@ -74,6 +74,8 @@ export type ICloseHardwareUiStateDialogParams = {
 class ServiceHardwareUI extends ServiceBase {
   private deviceCacheByConnectId: Map<string, IDBDevice> = new Map();
 
+  private hardwareInteractionIntentByConnectId = new Map<string, number>();
+
   constructor({ backgroundApi }: { backgroundApi: any }) {
     super({ backgroundApi });
     // This service caches `connectId -> IDBDevice` for hardware interaction dialogs.
@@ -467,17 +469,38 @@ class ServiceHardwareUI extends ServiceBase {
 
   processingNestedNum = 0;
 
+  private beginHardwareInteraction(connectId: string) {
+    this.hardwareInteractionIntentByConnectId.set(
+      connectId,
+      (this.hardwareInteractionIntentByConnectId.get(connectId) ?? 0) + 1,
+    );
+  }
+
+  private endHardwareInteraction(connectId: string) {
+    const remaining =
+      (this.hardwareInteractionIntentByConnectId.get(connectId) ?? 0) - 1;
+    if (remaining > 0) {
+      this.hardwareInteractionIntentByConnectId.set(connectId, remaining);
+    } else {
+      this.hardwareInteractionIntentByConnectId.delete(connectId);
+    }
+  }
+
   isOuterProcessing() {
     return this.processingNestedNum === 1;
   }
 
   @backgroundMethod()
-  async isHardwareChannelBusy(_params?: { connectId?: string }) {
+  async isHardwareChannelBusy(params?: { connectId?: string }) {
     const [hardwareUiState, firmwareUpdateWorkflowRunning] = await Promise.all([
       hardwareUiStateAtom.get(),
       firmwareUpdateWorkflowRunningAtom.get(),
     ]);
     return (
+      Boolean(
+        params?.connectId &&
+        this.hardwareInteractionIntentByConnectId.has(params.connectId),
+      ) ||
       this.processingNestedNum > 0 ||
       this.backgroundApi.serviceHardware.getFeaturesMutex.isLocked() ||
       firmwareUpdateWorkflowRunning ||
@@ -507,17 +530,21 @@ class ServiceHardwareUI extends ServiceBase {
     const connectId = device?.connectId;
     let isOuterCall = false;
 
-    if (connectId) {
-      await this.backgroundApi.serviceHardwarePortfolioSync.waitForActivePortfolioSync(
-        { connectId },
-      );
-    }
-
     // Third-party vendors (Ledger) don't use OneKey SDK
     // Skip all OneKey-specific flows: DeviceChecking dialog, mutex, cancel, resetToHome
     const isThirdPartyVendor = getVendorProfile(
       device?.vendor ?? EHardwareVendor.onekey,
     ).isThirdParty;
+    const prioritizesUserInteraction = Boolean(
+      connectId && !isThirdPartyVendor,
+    );
+
+    if (connectId && prioritizesUserInteraction) {
+      this.beginHardwareInteraction(connectId);
+      await this.backgroundApi.serviceHardwarePortfolioSync.cancelActivePortfolioSync(
+        { connectId },
+      );
+    }
 
     let deviceResetToHome = true;
     let isBusy = false;
@@ -725,6 +752,9 @@ class ServiceHardwareUI extends ServiceBase {
         }
       }
       this.processingNestedNum -= 1;
+      if (connectId && prioritizesUserInteraction) {
+        this.endHardwareInteraction(connectId);
+      }
       onFinally?.();
     }
   }

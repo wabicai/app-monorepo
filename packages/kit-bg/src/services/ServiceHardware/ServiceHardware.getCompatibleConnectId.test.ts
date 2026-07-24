@@ -384,7 +384,9 @@ describe('ServiceHardware.getCompatibleConnectId', () => {
     await expect(
       service.uploadPortfolioPackage({
         connectId: 'ONEKEY_USB',
+        operationId: 'portfolio:ONEKEY_USB:1:1',
         packageBytes,
+        timeoutMs: 5000,
       }),
     ).resolves.toEqual({ portfolioUpdated: true });
 
@@ -397,8 +399,32 @@ describe('ServiceHardware.getCompatibleConnectId', () => {
       hardwareCallContext: EHardwareCallContext.BACKGROUND_NON_INTERACTIVE,
     });
     expect(uploadPortfolio).toHaveBeenCalledWith('ONEKEY_USB', {
+      operationId: 'portfolio:ONEKEY_USB:1:1',
       packageBytes,
+      timeoutMs: 5000,
     });
+  });
+
+  it('cancels a hardware operation on the matching SDK connection', async () => {
+    const service = new ServiceHardware({
+      backgroundApi: {} as unknown as IBackgroundApi,
+    });
+    const cancelOperation = jest.fn();
+    const getSDKInstance = jest.fn().mockResolvedValue({
+      cancelOperation,
+    } as unknown as Awaited<ReturnType<ServiceHardware['getSDKInstance']>>);
+    service.getSDKInstance = getSDKInstance;
+
+    await service.cancelHardwareOperation({
+      connectId: 'ONEKEY_USB',
+      operationId: 'portfolio:ONEKEY_USB:1:1',
+    });
+
+    expect(getSDKInstance).toHaveBeenCalledWith({
+      connectId: 'ONEKEY_USB',
+      hardwareCallContext: EHardwareCallContext.SILENT_CALL,
+    });
+    expect(cancelOperation).toHaveBeenCalledWith('portfolio:ONEKEY_USB:1:1');
   });
 
   it('forwards an explicit Protocol V2 selection during Pro 2 discovery', async () => {

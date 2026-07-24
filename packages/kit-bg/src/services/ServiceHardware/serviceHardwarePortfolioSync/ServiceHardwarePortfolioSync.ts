@@ -22,6 +22,7 @@ import { devSettingsPersistAtom } from '../../../states/jotai/atoms/devSettings'
 import ServiceBase from '../../ServiceBase';
 
 import {
+  PORTFOLIO_SYNC_TRANSFER_COOLDOWN_MS,
   buildPortfolioSyncArtifacts,
   getPortfolioDisplayTimestamp,
   getPortfolioSyncCooldownRemainingMs,
@@ -35,6 +36,7 @@ import type {
 
 export type IPortfolioSyncStatus =
   | 'built'
+  | 'cancelled'
   | 'cooldown'
   | 'disabled'
   | 'duplicate'
@@ -69,7 +71,14 @@ type IPortfolioServerSubmitResult = NonNullable<
   IPortfolioSyncLastResult['serverSubmit']
 >;
 
+type IActivePortfolioUpload = {
+  cancelledByUser: boolean;
+  operationId: string;
+  promise: Promise<{ portfolioUpdated: boolean }>;
+};
+
 const LOG_PREFIX = '[PRO2-PORTFOLIO-SYNC]';
+const PORTFOLIO_DEVICE_COMMAND_TIMEOUT_MS = 5000;
 
 function stringifyLogValue(value: unknown) {
   try {
@@ -116,10 +125,9 @@ class ServiceHardwarePortfolioSync extends ServiceBase {
     ReturnType<typeof setTimeout>
   >();
 
-  private activeUploadByConnectId = new Map<
-    string,
-    Promise<{ portfolioUpdated: boolean }>
-  >();
+  private activeUploadByConnectId = new Map<string, IActivePortfolioUpload>();
+
+  private operationSequence = 0;
 
   private syncDebounced = debounce(
     (eventPayload: IPortfolioSyncSettledPayload) => {
@@ -159,6 +167,11 @@ class ServiceHardwarePortfolioSync extends ServiceBase {
 
   private setLastResult(result: IPortfolioSyncLastResult) {
     this.lastResult = result;
+  }
+
+  private createOperationId(connectId: string) {
+    this.operationSequence += 1;
+    return `portfolio:${connectId}:${Date.now()}:${this.operationSequence}`;
   }
 
   private get portfolioSyncDb() {
@@ -350,6 +363,7 @@ class ServiceHardwarePortfolioSync extends ServiceBase {
   ) {
     const updatedAt = Date.now();
     const targetKey = this.getSyncTargetKey(eventPayload);
+    let activeUpload: IActivePortfolioUpload | undefined;
     try {
       if (!(await this.shouldRunDevFlow())) {
         debugPortfolioSyncLog('skip-disabled');
@@ -498,6 +512,11 @@ class ServiceHardwarePortfolioSync extends ServiceBase {
               updatedAt,
             }),
           );
+          this.scheduleSyncAfterCooldown({
+            deviceConnectId,
+            eventPayload,
+            remainingMs: PORTFOLIO_SYNC_TRANSFER_COOLDOWN_MS,
+          });
           return;
         }
       }
@@ -533,21 +552,42 @@ class ServiceHardwarePortfolioSync extends ServiceBase {
           debugPortfolioSyncLog(`skip-${status}`, {
             contentHash: artifacts.contentHash,
           });
+          if (status === 'hardware-busy') {
+            this.scheduleSyncAfterCooldown({
+              deviceConnectId,
+              eventPayload,
+              remainingMs: PORTFOLIO_SYNC_TRANSFER_COOLDOWN_MS,
+            });
+          }
           return;
         }
 
-        const uploadPromise =
-          this.backgroundApi.serviceHardware.uploadPortfolioPackage({
+        const operationId = this.createOperationId(deviceConnectId);
+        const uploadPromise = Promise.resolve().then(() => {
+          if (activeUpload?.cancelledByUser) {
+            throw new OneKeyLocalError(
+              'Portfolio sync cancelled by user interaction',
+            );
+          }
+          return this.backgroundApi.serviceHardware.uploadPortfolioPackage({
             connectId: deviceConnectId,
+            operationId,
             packageBytes: serverPackageBytes,
+            timeoutMs: PORTFOLIO_DEVICE_COMMAND_TIMEOUT_MS,
           });
-        this.activeUploadByConnectId.set(deviceConnectId, uploadPromise);
+        });
+        activeUpload = {
+          cancelledByUser: false,
+          operationId,
+          promise: uploadPromise,
+        };
+        this.activeUploadByConnectId.set(deviceConnectId, activeUpload);
         let upload: { portfolioUpdated: boolean };
         try {
           upload = await uploadPromise;
         } finally {
           if (
-            this.activeUploadByConnectId.get(deviceConnectId) === uploadPromise
+            this.activeUploadByConnectId.get(deviceConnectId) === activeUpload
           ) {
             this.activeUploadByConnectId.delete(deviceConnectId);
           }
@@ -591,24 +631,48 @@ class ServiceHardwarePortfolioSync extends ServiceBase {
     } catch (error) {
       // Release the in-flight reservation so the same snapshot can be retried.
       this.inFlightContentHashByTargetKey.delete(targetKey);
-      debugPortfolioSyncLog('error', {
+      const cancelledByUser = activeUpload?.cancelledByUser === true;
+      if (cancelledByUser && eventPayload.deviceConnectId) {
+        this.scheduleSyncAfterCooldown({
+          deviceConnectId: eventPayload.deviceConnectId,
+          eventPayload,
+          remainingMs: PORTFOLIO_SYNC_TRANSFER_COOLDOWN_MS,
+        });
+      }
+      debugPortfolioSyncLog(cancelledByUser ? 'cancelled' : 'error', {
         message: (error as Error)?.message,
       });
       this.setLastResult({
         errorMessage: (error as Error)?.message,
-        status: 'error',
+        status: cancelledByUser ? 'cancelled' : 'error',
         updatedAt,
       });
     }
   }
 
   @backgroundMethod()
-  async waitForActivePortfolioSync({ connectId }: { connectId: string }) {
+  async cancelActivePortfolioSync({ connectId }: { connectId: string }) {
     const activeUpload = this.activeUploadByConnectId.get(connectId);
     if (!activeUpload) {
       return false;
     }
-    await activeUpload.catch(() => undefined);
+    activeUpload.cancelledByUser = true;
+    debugPortfolioSyncLog('cancel-active-upload', {
+      connectId,
+      operationId: activeUpload.operationId,
+    });
+    await this.backgroundApi.serviceHardware
+      .cancelHardwareOperation({
+        connectId,
+        operationId: activeUpload.operationId,
+      })
+      .catch((error: unknown) => {
+        debugPortfolioSyncLog('cancel-active-upload-error', {
+          message: error instanceof Error ? error.message : String(error),
+          operationId: activeUpload.operationId,
+        });
+      });
+    await activeUpload.promise.catch(() => undefined);
     return true;
   }
 

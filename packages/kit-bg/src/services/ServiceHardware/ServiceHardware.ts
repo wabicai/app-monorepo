@@ -2235,10 +2235,14 @@ class ServiceHardware extends ServiceBase {
   @backgroundMethod()
   async uploadPortfolioPackage({
     connectId,
+    operationId,
     packageBytes,
+    timeoutMs,
   }: {
     connectId: string;
+    operationId: string;
     packageBytes: ArrayBuffer;
+    timeoutMs: number;
   }) {
     const compatibleConnectId = await this.getCompatibleConnectId({
       connectId,
@@ -2251,14 +2255,35 @@ class ServiceHardware extends ServiceBase {
     const portfolioSDK = hardwareSDK as typeof hardwareSDK & {
       uploadPortfolio: (
         targetConnectId: string,
-        params: { packageBytes: ArrayBuffer },
+        params: {
+          operationId: string;
+          packageBytes: ArrayBuffer;
+          timeoutMs: number;
+        },
       ) => HardwareResponse<{ portfolioUpdated: true }>;
     };
     return convertDeviceResponse(() =>
       portfolioSDK.uploadPortfolio(compatibleConnectId, {
+        operationId,
         packageBytes,
+        timeoutMs,
       }),
     );
+  }
+
+  @backgroundMethod()
+  async cancelHardwareOperation({
+    connectId,
+    operationId,
+  }: {
+    connectId: string;
+    operationId: string;
+  }) {
+    const hardwareSDK = await this.getSDKInstance({
+      connectId,
+      hardwareCallContext: EHardwareCallContext.SILENT_CALL,
+    });
+    hardwareSDK.cancelOperation(operationId);
   }
 
   @backgroundMethod()
