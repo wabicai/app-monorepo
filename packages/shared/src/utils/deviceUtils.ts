@@ -138,6 +138,12 @@ function isTouchDevice(deviceType: IDeviceType) {
   );
 }
 
+// Pro2 server-side firmware verification is not ready yet.
+// Keep all firmware verification capability checks centralized here.
+function isFirmwareVerifySupported(deviceType?: IDeviceType) {
+  return deviceType !== EDeviceType.Pro2;
+}
+
 async function getDeviceTypeFromFeatures({
   features,
 }: {
@@ -845,6 +851,7 @@ export default {
   getFirmwareTypeLabel,
   getFirmwareTypeLabelByFirmwareType,
   isTouchDevice,
+  isFirmwareVerifySupported,
   buildDeviceUSBConnectId,
   attachAppParamsToFeatures,
   checkInputPinOnSoftwareSupport,

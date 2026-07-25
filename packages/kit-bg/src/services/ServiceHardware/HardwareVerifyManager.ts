@@ -1,4 +1,4 @@
-import { EDeviceType, EFirmwareType } from '@onekeyfe/hd-shared';
+import { EFirmwareType } from '@onekeyfe/hd-shared';
 
 import {
   backgroundMethod,
@@ -52,12 +52,6 @@ export type IFirmwareAuthenticateParams = {
 };
 
 const deviceCheckingCodes = new Set([10_104, 10_105, 10_106, 10_107]);
-
-const SKIP_APP_FIRMWARE_VERIFY = true;
-
-function shouldSkipFirmwareAuthenticateForDevice(deviceType?: IDeviceType) {
-  return deviceType === EDeviceType.Pro2;
-}
 
 function buildSkippedFirmwareAuthenticateResult(
   device: SearchDevice | IDBDevice,
@@ -135,11 +129,7 @@ export class HardwareVerifyManager extends ServiceHardwareManagerBase {
   async shouldAuthenticateFirmware({
     device,
   }: IShouldAuthenticateFirmwareParams) {
-    if (shouldSkipFirmwareAuthenticateForDevice(device.deviceType)) {
-      return false;
-    }
-
-    if (SKIP_APP_FIRMWARE_VERIFY) {
+    if (!deviceUtils.isFirmwareVerifySupported(device.deviceType)) {
       return false;
     }
 
@@ -166,7 +156,7 @@ export class HardwareVerifyManager extends ServiceHardwareManagerBase {
     skipDeviceCancel,
   }: IFirmwareAuthenticateParams): Promise<IFirmwareVerifyResult> {
     const { connectId, deviceType } = device;
-    if (shouldSkipFirmwareAuthenticateForDevice(deviceType)) {
+    if (!deviceUtils.isFirmwareVerifySupported(deviceType)) {
       return buildSkippedFirmwareAuthenticateResult(device);
     }
 
@@ -272,7 +262,10 @@ export class HardwareVerifyManager extends ServiceHardwareManagerBase {
   }: {
     features: IOneKeyDeviceFeatures | undefined;
   }) {
-    if (SKIP_APP_FIRMWARE_VERIFY) {
+    const deviceType = features
+      ? await deviceUtils.getDeviceTypeFromFeatures({ features })
+      : undefined;
+    if (!deviceUtils.isFirmwareVerifySupported(deviceType)) {
       return false;
     }
 
@@ -333,7 +326,7 @@ export class HardwareVerifyManager extends ServiceHardwareManagerBase {
   async fetchFirmwareVerifyHash(
     params: IFetchFirmwareVerifyHashParams,
   ): Promise<IFirmwareVerifyInfo[]> {
-    if (SKIP_APP_FIRMWARE_VERIFY) {
+    if (!deviceUtils.isFirmwareVerifySupported(params.deviceType)) {
       return [];
     }
 
@@ -383,7 +376,7 @@ export class HardwareVerifyManager extends ServiceHardwareManagerBase {
     deviceType: IDeviceType;
     onekeyFeatures: OnekeyFeatures | undefined;
   }): Promise<IDeviceVerifyVersionCompareResult> {
-    if (SKIP_APP_FIRMWARE_VERIFY) {
+    if (!deviceUtils.isFirmwareVerifySupported(deviceType)) {
       return buildSkippedFirmwareHashResult(onekeyFeatures);
     }
 
