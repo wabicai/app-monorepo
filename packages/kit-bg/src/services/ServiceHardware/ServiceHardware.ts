@@ -278,6 +278,41 @@ class ServiceHardware extends ServiceBase {
 
   private connectedDeviceTracked = new Set<string>();
 
+  private deviceProtocolByConnectId = new Map<string, 'V1' | 'V2'>();
+
+  private getProtocolFromDevice(
+    device: SearchDevice | KnownDevice | undefined,
+  ): 'V1' | 'V2' | undefined {
+    const protocolAwareDevice = device as
+      | ((SearchDevice | KnownDevice) & {
+          connectProtocol?: 'V1' | 'V2';
+          state?: { protocol?: string | null };
+        })
+      | undefined;
+    const protocol =
+      protocolAwareDevice?.connectProtocol ??
+      protocolAwareDevice?.state?.protocol;
+    return protocol === 'V1' || protocol === 'V2' ? protocol : undefined;
+  }
+
+  private rememberDeviceProtocol({
+    device,
+    connectIds,
+  }: {
+    device?: SearchDevice | KnownDevice;
+    connectIds: Array<string | null | undefined>;
+  }) {
+    const protocol = this.getProtocolFromDevice(device);
+    if (!protocol) {
+      return;
+    }
+    for (const connectId of connectIds) {
+      if (connectId) {
+        this.deviceProtocolByConnectId.set(connectId, protocol);
+      }
+    }
+  }
+
   checkSdkVersionValid() {
     if (process.env.NODE_ENV !== 'production') {
       const {
@@ -1133,30 +1168,47 @@ class ServiceHardware extends ServiceBase {
       hardwareCallContext:
         hardwareCallContext || EHardwareCallContext.USER_INTERACTION,
     });
+    this.rememberDeviceProtocol({
+      device,
+      connectIds: [
+        connectId,
+        compatibleConnectId,
+        (device as SearchDevice & { serialNo?: string }).serialNo,
+        device.uuid,
+      ],
+    });
+    const connectProtocol =
+      this.getProtocolFromDevice(device) ??
+      this.deviceProtocolByConnectId.get(compatibleConnectId);
+
+    const knownFeatures = (device as KnownDevice).features;
+    if (!platformEnv.isNative && knownFeatures) {
+      // WebUSB 搜索或授权阶段已经初始化设备，直接复用结果，
+      // 避免重复连接失败后再次弹出权限选择框。
+      return knownFeatures;
+    }
+
+    const params = {
+      ...(connectProtocol ? { connectProtocol } : {}),
+      ...(hardwareCallContext === EHardwareCallContext.UPDATE_FIRMWARE
+        ? { allowEmptyConnectId: true }
+        : {}),
+    } as IDeviceGetFeaturesOptions['params'];
 
     if (platformEnv.isNative) {
       try {
         return await this.connectDevice({
           connectId: compatibleConnectId,
+          params,
         });
       } catch (e: any) {
         this.handlerConnectError(e);
       }
     } else {
-      /**
-       * USB does not need the extra getFeatures call
-       */
-      try {
-        return await this.connectDevice({
-          connectId: compatibleConnectId,
-          params: {
-            allowEmptyConnectId:
-              hardwareCallContext === EHardwareCallContext.UPDATE_FIRMWARE,
-          },
-        });
-      } catch (_e: any) {
-        return (device as KnownDevice).features;
-      }
+      return this.connectDevice({
+        connectId: compatibleConnectId,
+        params,
+      });
     }
   }
 
@@ -2196,18 +2248,32 @@ class ServiceHardware extends ServiceBase {
     const hardwareSDK = await this.getSDKInstance({
       connectId: undefined,
     });
+    let result: Awaited<ReturnType<typeof hardwareSDK.promptWebDeviceAccess>>;
     try {
-      return await convertDeviceResponse(() =>
+      result = await convertDeviceResponse(() =>
         hardwareSDK?.promptWebDeviceAccess(params),
       );
     } catch (error) {
       if (await this.recoverLinuxWebUsbAccessDeniedError(error)) {
-        return convertDeviceResponse(() =>
+        result = await convertDeviceResponse(() =>
           hardwareSDK?.promptWebDeviceAccess(params),
         );
+      } else {
+        throw error;
       }
-      throw error;
     }
+    const device = result.device as KnownDevice | undefined;
+    this.rememberDeviceProtocol({
+      device,
+      connectIds: [
+        params.deviceSerialNumberFromUI,
+        device?.connectId,
+        (device as (KnownDevice & { serialNo?: string }) | undefined)?.serialNo,
+        device?.uuid,
+        device?.path,
+      ],
+    });
+    return result;
   }
 
   private async _needCheckBridgeStatus() {
